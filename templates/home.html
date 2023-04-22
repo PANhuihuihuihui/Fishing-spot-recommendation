@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="container">
+    <h1 class="text-center mt-5">Michigan Fishing Spot Recommendation</h1>
+
+    <div id="location-container" class="mt-5">
+        <h2 class="text-center">Find your County</h2>
+        <div class="d-flex justify-content-center">
+          <select id="county-select" class="form-control w-50">
+            <option value="">Select your county</option>
+            <!-- Add county options here -->
+          </select>
+          <button id="locate-me" class="btn btn-primary me-2">Locate Me</button>
+        </div>
+      </div>
+      
+
+    <div id="question-container" class="mt-5">
+        <h2 id="question-text" class="text-center">What's your fishing kind?</h2>
+        <div class="d-flex justify-content-center">
+            <select id="species-select" class="form-control w-50">
+                <option value="">Select a species</option>
+                <!-- Add species options here -->
+            </select>
+        </div>
+    </div>
+
+    <div id="results-container" class="mt-5">
+      <h2>Recommended Fishing Spots:</h2>
+      <div class="nav nav-tabs" id="result-tabs" role="tablist">
+        <a class="nav-link active" id="list-tab" data-bs-toggle="tab" href="#list" role="tab" aria-controls="list" aria-selected="true">List</a>
+        <a class="nav-link" id="map-tab" data-bs-toggle="tab" href="#map" role="tab" aria-controls="map" aria-selected="false">Map</a>
+      </div>
+      <div class="tab-content mt-2" id="result-tabs-content">
+        <div class="tab-pane fade show active" id="list" role="tabpanel" aria-labelledby="list-tab">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="sort-method" id="sort-rating" value="rating" checked>
+            <label class="form-check-label" for="sort-rating">Sort by Rating</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="sort-method" id="sort-distance" value="distance">
+            <label class="form-check-label" for="sort-distance">Sort by Distance</label>
+          </div>
+          <ul id="results" class="list-group"></ul>
+        </div>
+        <div class="tab-pane fade" id="map" role="tabpanel" aria-labelledby="map-tab">
+          <div id="map-container" style="width: 100%; height: 400px;"></div>
+        </div>
+      </div>
+    </div>
+    
+
+    
+
+
+  <script>
+    let userLocation = null;
+    let userCounty = null;
+    let userSpecies = null;
+    let fishingSpots = [];
+    let map = null;
+
+    function haversine(lat1, lon1, lat2, lon2) {
+      function toRad(x) {
+        return (x * Math.PI) / 180;
+      }
+    
+      const R = 6371; // Earth's radius in km
+      const dLat = toRad(lat2 - lat1);
+      const dLon = toRad(lon2 - lon1);
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const d = R * c;
+    
+      return d;
+    }
+    
+    
+    function getCountyFromCoordinates(latitude, longitude, callback) {
+        const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`;
+        $.get(url, function (data) {
+          if (data && data.address && data.address.county) {
+            callback(data.address.county);
+          } else {
+            callback(null);
+          }
+        }).fail(function () {
+          callback(null);
+        });
+      }
+
+      function updateResults() {
+        // Check if the distance attribute is present in the first element of the fishingSpots array
+        const hasDistance = fishingSpots.length > 0 && typeof fishingSpots[0].distance !== 'undefined';
+
+        // Disable or enable the 'Sort by Distance' radio button based on the presence of the distance attribute
+        $("#sort-distance").prop("disabled", !hasDistance);
+        // Sort fishingSpots based on the selected sort method
+        const sortMethod = $("input[name='sort-method']:checked").val();
+        fishingSpots.sort(function (a, b) {
+         if (sortMethod === "distance" && hasDistance) {
+            return a.distance - b.distance;
+          }else{
+            return b.rating - a.rating;
+          }
+        });
+
+
+      
+        $("#results").empty();
+
+        if (fishingSpots.length === 0) {
+          $("#results").append('<li class="list-group-item">No results</li>');
+          $("#sort-distance").prop("disabled", true );
+
+        } else {
+          setMapCenter(fishingSpots[0].latitude, fishingSpots[0].longitude);
+          for (const spot of fishingSpots) {
+            let ratingInfo = `Rating: ${spot.rating}`;
+            if (spot.rating === 0) {
+              ratingInfo = 'No rating';
+            }
+            let distanceInfo = userLocation ? `Distance: ${spot.distance.toFixed(2)} km` : '';
+        
+            $("#results").append(`<li class="list-group-item">${spot.name} | ${ratingInfo} | ${distanceInfo}</li>`);
+          
+          }
+          // Add the 'show' class to the #results-container
+          $("#sort-rating").prop("disabled", false);
+          
+        }
+        $("#results-container").addClass("show");
+         // Update the map markers
+        updateMapMarkers();
+
+      }
+
+
+    
+    function fetchSpecies(endpoint,query) {
+      $.get(`${endpoint}?query=${encodeURIComponent(query)}`, function (data) {
+        console.log(data);
+        for (const species of data) {
+          $("#species-select").append(`<option value="${species.name}">${species.name}</option>`);
+        }
+      });
+    }
+      
+      
+  
+    
+
+    function fetchFishingSpots() {
+      if (userCounty && userSpecies) {
+        const endpoint = `/fishing_spots_by_county_and_species?county=${encodeURIComponent(userCounty)}&species=${encodeURIComponent(userSpecies)}`;
+        $.get(endpoint, function (data) {
+          if (userLocation) {
+            data.forEach(spot => {
+              spot.distance = haversine(
+                userLocation.latitude,
+                userLocation.longitude,
+                spot.latitude,
+                spot.longitude
+              );
+            });
+          }
+          fishingSpots = data;
+          updateResults();
+        });
+      }
+    }
+  
+
+    $("#locate-me").click(function () {
+       $("#question-container").removeClass("show");
+        navigator.geolocation.getCurrentPosition(function (position) {
+          userLocation = {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          };
+      
+          getCountyFromCoordinates(userLocation.latitude, userLocation.longitude, function (county) {
+            console.log(county);
+            if (county) {
+                county = county.replace(" County", "");
+              userCounty = county;
+              userLocation = {
+                latitude: position.coords.latitude,
+                longitude: position.coords.longitude,
+                coutny : userCounty
+              };
+      
+              // Check if the fetched county is already in the dropdown list
+              if (!$("#county-select option[value='" + userCounty + "']").length) {
+                // Add the fetched county as a new option in the dropdown list
+                $("#county-select").append(`<option value="${userCounty}">${userCounty}</option>`);
+              }
+      
+              $("#county-select").val(userCounty);
+              fetchSpecies("/species_by_county", JSON.stringify(userLocation));
+            }
+          });
+        });
+        $("#question-container").addClass("show");
+        $("#results-container").removeClass("show");
+      });
+      
+      
+
+  
+    $("#county-select").change(function () {
+      userCounty = $(this).val();
+      if (userCounty) {
+        fetchSpecies("/species_by_county", userCounty);
+      }
+      $("#question-container").addClass("show");
+      $("#results-container").removeClass("show");
+
+    });
+    // Species selection event listener
+    $("#species-select").change(function () {
+      userSpecies = $(this).val();
+      if (userSpecies && userCounty) {
+        fetchFishingSpots();
+      }
+      $("#results-container").addClass("show");
+    });
+
+  
+    $("input[name='sort-method']").change(function () {
+     
+        const sortMethod = $(this).val()
+    
+        updateResults();
+      });
+    
+      // Fetch and populate county options
+      $.get("/counties", function (data) {
+        for (const county of data) {
+          $("#county-select").append(`<option value="${county.name}">${county.name}</option>`);
+        }
+      });
+      // set the map center to the user's location
+      function setMapCenter(latitude, longitude) {
+        if (map) {
+          map.setView([latitude, longitude], 13);
+        }
+      }
+      
+      
+
+
+      // Initialize the map
+      function initializeMap(latitude, longitude) {
+        if (!map) {
+          map = L.map("map", { center: [latitude, longitude], zoom: 13 });
+          L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution:
+              '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+          }).addTo(map);
+          $("#map-tab").off("click");
+        }
+      }
+      
+      
+
+
+      // Add fishing spot markers to the map
+      function updateMapMarkers() {
+        if (map) {
+          map.eachLayer((layer) => {
+            if (layer instanceof L.Marker) {
+              map.removeLayer(layer);
+            }
+          });
+
+          for (const spot of fishingSpots) {
+            const marker = L.marker([spot.latitude, spot.longitude]);
+            const popupText = `
+              <strong>${spot.name}</strong><br>
+              Rating: ${spot.rating ? spot.rating : "No rating"}<br>
+              Max Depth: ${spot.max_depth ? spot.max_depth : "Unknown"}<br>
+              Size: ${spot.size ? spot.size : "Unknown"}
+            `;
+            const popup = L.popup().setContent(popupText);
+            marker.on("mouseover", () => {
+              marker.bindPopup(popup).openPopup();
+            });
+            marker.addTo(map);
+          }
+        }
+        }
+
+
+        {% comment %} $("#map-tab").on("click", function () {
+          
+        }); {% endcomment %}
+        $(document).ready(function () {
+          if (fishingSpots.length > 0) {
+            initializeMap(fishingSpots[0].latitude, fishingSpots[0].longitude);
+          } else {
+            initializeMap(51.505, -0.09);
+          }
+        });
+        
+        
+      
+
+
+
+        
+        
+
+    </script>
+  {% endblock %}
+  
